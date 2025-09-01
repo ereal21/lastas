@@ -1,7 +1,11 @@
 import os
 from aiogram import Bot
-
+from aiogram.utils.exceptions import (
+    ChatNotFound, BotBlocked, CantInitiateConversation,
+    WrongFileIdentifier, TelegramAPIError
+)
 from bot.misc import EnvKeys
+from bot.logger_mesh import logger
 
 
 async def notify_owner_of_purchase(
@@ -14,44 +18,55 @@ async def notify_owner_of_purchase(
     category_name: str,
     photo_description: str,
     file_path: str | None,
-) -> None:
-    """Send purchase details to the bot owner.
-
-    If ``file_path`` is provided and points to an existing file, the file is sent
-    as a photo/video with the details in the caption. Otherwise a text message is
-    sent.
-
-    The notification includes the buyer's username, purchase date, product name,
-    price, category, subcategory and photo description.
+):
     """
-    text = (
-        f"User: {username}\n"
-        f"Date: {formatted_time} GMT+3\n"
-        f"Product: {item_name}\n"
-        f"Price: {item_price}€\n"
-        f"Category: {parent_cat or '-'}\n"
-        f"Subcategory: {category_name}\n"
-        f"Photo description: {photo_description or '-'}"
-    )
-
-    owner_id = EnvKeys.OWNER_ID
-    if not owner_id:
-        return
+    Send a purchase notification to the OWNER_ID with details.
+    If a media file path is provided and exists, send photo/video + caption,
+    otherwise send a text message. All sends are protected with try/except.
+    """
+    # 1) Resolve & validate OWNER_ID
     try:
-        owner_id = int(owner_id)
+        owner_id = int(EnvKeys.OWNER_ID) if EnvKeys.OWNER_ID else None
     except (TypeError, ValueError):
-        pass
+        owner_id = None
 
-    owner_id = int(EnvKeys.OWNER_ID) if EnvKeys.OWNER_ID else None
-    if owner_id is None:
+    if not owner_id:
+        logger.warning("notify_owner_of_purchase: OWNER_ID is missing or invalid.")
         return
 
+    # 2) Build caption (HTML)
+    prefix = f"{parent_cat} → " if parent_cat else ""
+    text = (
+        f"🛒 <b>New purchase</b>\n"
+        f"👤 Buyer: {username}\n"
+        f"🗓️ Time: {formatted_time}\n"
+        f"📦 Item: {prefix}{category_name} / <b>{item_name}</b>\n"
+        f"💶 Price: <b>{item_price}€</b>\n"
+        f"\n{photo_description or ''}"
+    ).strip()
 
-    if file_path and os.path.isfile(file_path):
-        with open(file_path, "rb") as media:
-            if file_path.endswith(".mp4"):
-                await bot.send_video(owner_id, media, caption=text)
-            else:
-                await bot.send_photo(owner_id, media, caption=text)
-    else:
-        await bot.send_message(owner_id, text)
+    # 3) Try media first if available, else text; fall back to plain text on errors
+    try:
+        if file_path and os.path.isfile(file_path):
+            with open(file_path, "rb") as media:
+                if file_path.lower().endswith(".mp4"):
+                    await bot.send_video(owner_id, media, caption=text, parse_mode="HTML")
+                else:
+                    await bot.send_photo(owner_id, media, caption=text, parse_mode="HTML")
+        else:
+            await bot.send_message(owner_id, text, parse_mode="HTML")
+
+    except (BotBlocked, CantInitiateConversation):
+        logger.error(
+            "notify_owner_of_purchase: Cannot DM OWNER_ID=%s (bot blocked or no conversation). "
+            "Ask the owner to /start the bot once.", owner_id
+        )
+    except (ChatNotFound, WrongFileIdentifier) as e:
+        logger.exception("notify_owner_of_purchase: Chat/file issue: %s", e)
+        try:
+            await bot.send_message(owner_id, text, parse_mode="HTML")
+        except TelegramAPIError as e2:
+            logger.exception("notify_owner_of_purchase: Fallback send_message failed: %s", e2)
+    except TelegramAPIError as e:
+        logger.exception("notify_owner_of_purchase: Telegram API error: %s", e)
+

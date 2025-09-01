@@ -16,6 +16,19 @@ async def __on_start_up(dp: Dispatcher) -> None:
     register_all_handlers(dp)
     register_models()
 
+    try:
+        owner_id = int(EnvKeys.OWNER_ID) if EnvKeys.OWNER_ID else None
+    except (TypeError, ValueError):
+        owner_id = None
+
+    if owner_id:
+        try:
+            await dp.bot.send_message(owner_id, "✅ Bot started and ready to send purchase notifications.")
+        except Exception as e:
+            logger.error("Startup ping to OWNER_ID=%s failed: %s", owner_id, e)
+    else:
+        logger.warning("OWNER_ID is not set or invalid; cannot send startup ping.")
+
 
 def start_bot():
     bot = Bot(token=EnvKeys.TOKEN, parse_mode='HTML')
